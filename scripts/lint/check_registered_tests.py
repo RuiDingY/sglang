@@ -13,9 +13,13 @@ import os
 import re
 import sys
 
+import yaml
+
 # Exactly what stage=/runner_config= produces, so a legacy suite= of this shape
 # is always expressible the modern way.
 _MODERN_SHAPE = re.compile(r"^(.+)-test-(.+)$")
+
+_RUNNER_CONFIGS = os.path.join("scripts", "ci", "runner_configs.yml")
 
 # The only CUDA family still allowed on legacy `suite=`; anything else resolves
 # to a suite no workflow invokes and the test silently never runs.
@@ -90,6 +94,25 @@ def taxonomy_errors(path: str, tree: ast.AST) -> list[str]:
     return []
 
 
+def _amd_errors(path: str, r, amd_runner_configs: set[str]) -> list[str]:
+    """An AMD registration must name an amd_runner_configs key, as CUDA ones do theirs."""
+    if r.runner_config is not None:
+        if r.runner_config in amd_runner_configs:
+            return []
+        return [
+            f'{path}\n    runner_config="{r.runner_config}" is not in '
+            f"amd_runner_configs of {_RUNNER_CONFIGS}"
+        ]
+    # Legacy suite= on a per-commit/extra AMD suite; nightly suites stay legacy.
+    m = _MODERN_SHAPE.match(r.suite or "")
+    if m and m.group(2) in amd_runner_configs:
+        return [
+            f'{path}\n    suite="{r.suite}"'
+            f'  ->  stage="{m.group(1)}", runner_config="{m.group(2)}"'
+        ]
+    return []
+
+
 def main() -> int:
     # Import ci_register directly to avoid pulling in all of sglang
     spec = importlib.util.spec_from_file_location(
@@ -99,6 +122,9 @@ def main() -> int:
     ci_register = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ci_register)
     cuda = ci_register.HWBackend.CUDA
+    amd = ci_register.HWBackend.AMD
+    with open(_RUNNER_CONFIGS, encoding="utf-8") as fh:
+        amd_runner_configs = set(yaml.safe_load(fh)["amd_runner_configs"])
 
     # Same exclusion as run_suite.py: pytest+package structure files.
     files = sorted(
@@ -114,6 +140,7 @@ def main() -> int:
     non_dispatchable = []  # (file, suite) -- legacy CUDA suite no workflow invokes
     dead_tests = []  # (file) -- TestCase classes that `python3 file.py` never runs
     taxonomy_violations = []
+    amd_errors = []
     for f in files:
         try:
             registries, _has_main_entry = ci_register.ut_parse_one_file(f)
@@ -130,6 +157,9 @@ def main() -> int:
         if _defines_testcase(tree) and not _main_runs_tests(tree):
             dead_tests.append(f)
         for r in registries:
+            if r.backend == amd:
+                amd_errors.extend(_amd_errors(f, r, amd_runner_configs))
+                continue
             # Pure legacy form on a CUDA registry: suite set, stage/runner unset.
             if not (
                 r.backend == cuda
@@ -178,6 +208,16 @@ def main() -> int:
         )
         for f, suite in non_dispatchable:
             print(f'  {f}\n    suite="{suite}"  ->  stage="...", runner_config="..."')
+        print()
+        exit_code = 1
+    if amd_errors:
+        print(
+            "ERROR: AMD test(s) whose runner is not resolved through the "
+            f"amd_runner_configs section of {_RUNNER_CONFIGS}. Register with "
+            "`stage=`/`runner_config=` and a runner_config listed there:\n"
+        )
+        for error in amd_errors:
+            print(f"  {error}")
         print()
         exit_code = 1
     if dead_tests:

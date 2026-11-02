@@ -14,7 +14,9 @@ from sglang.test.test_utils import (
     try_cached_model,
 )
 
-register_amd_ci(est_time=900, suite="stage-b-test-large-8-gpu-mi35x-disaggregation-amd")
+register_amd_ci(
+    est_time=900, stage="stage-b", runner_config="large-8-gpu-mi35x-disaggregation-amd"
+)
 
 
 class MoriTransferEngineBase(PDDisaggregationServerBase):
